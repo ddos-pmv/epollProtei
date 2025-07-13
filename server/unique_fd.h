@@ -23,6 +23,7 @@ namespace protei
     UniqueFd &operator=(const UniqueFd &) = delete;
 
     UniqueFd(UniqueFd &&other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
+
     UniqueFd &operator=(UniqueFd &&other)
     {
       if (this != &other)
@@ -40,7 +41,6 @@ namespace protei
     template <std::integral T>
     auto operator<=>(T other) const
     {
-      std::cout << "operator<=>(T other)\n";
       return fd_ <=> static_cast<long long>(other);
     }
     auto operator<=>(const UniqueFd &other) const = default;

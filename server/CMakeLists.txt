@@ -1,2 +1,3 @@
 
-add_executable(epollServer main.cpp)
+add_executable(epollServer main.cpp
+server.cpp)

@@ -1,8 +1,12 @@
 #pragma once
 
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <thread>
+#include <vector>
+#include <atomic>
+#include <queue>
+#include <mutex>
+#include <unordered_set>
+#include <condition_variable>
 
 #include <cstdint>
 
@@ -14,51 +18,30 @@ namespace protei
   class Server
   {
   public:
-    Server(uint16_t port) : port_(port),
-                            fd_(socket(AF_INET, SOCK_STREAM, 0))
-    {
+    Server(uint16_t port, int thread_count = 6);
 
-      if (0 > fd_)
-      {
-        throw std::runtime_error("no socket can't be created");
-      }
-
-      sockaddr_in serverAddress;
-      serverAddress.sin_family = AF_INET;
-      serverAddress.sin_port = htons(port);
-      serverAddress.sin_addr.s_addr = INADDR_ANY;
-
-      int opt = 1;
-      if (setsockopt(fd_.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0)
-      {
-        throw std::runtime_error("Error setting options");
-      }
-
-      if (bind(fd_.get(), reinterpret_cast<struct sockaddr *>(&serverAddress),
-               sizeof(serverAddress)) < 0)
-      {
-        throw std::runtime_error("Error socket binding");
-      }
-
-      if (set_nonblocking(fd_) < 0)
-      {
-        throw std::runtime_error("Error set non blocking");
-      }
-    }
-
-    void start()
-    {
-
-      // if (listend())
-    }
+    void start();
 
   private:
+    void worker_thread();
+
+    void accept_new_connection();
+    void add_to_queue(int fd);
+    void process_client(int fd);
+
     uint16_t port_;
     UniqueFd fd_;
+    UniqueFd epoll_fd_;
 
-    int set_nonblocking(const UniqueFd &fd)
-    {
-      return fcntl(fd.get(), fcntl(fd.get(), F_SETFL, F_GETFD, 0) | O_NONBLOCK);
-    }
+    std::vector<UniqueFd> clients_;
+
+    int thread_count_;
+    std::vector<std::thread>
+        thread_pool_;
+    std::queue<int>
+        connection_queue_;
+    alignas(64) std::condition_variable cv_;
+    alignas(64) std::mutex queue_mtx_;
+    alignas(64) std::atomic_bool stop_;
   };
 } // namespace protei
