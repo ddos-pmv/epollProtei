@@ -1,3 +1,11 @@
+# Loacl files
+.vscode
+.idea
+cmake
+build
+
+
+
 # Prerequisites
 *.d
 
