@@ -44,9 +44,15 @@ namespace protei
 
         epoll_event ev{};
         ev.events = EPOLLIN; // LT by default
-        ev.data.fd = fd_.get();
 
-        std::cout << "SIZEOF(epool_event)" << sizeof(epoll_event) << std::endl;
+        auto server_ctx = new ClientCtx;
+        server_ctx->fd = fd_.get();
+        ev.data.ptr = server_ctx;
+
+        std::cout
+            << "SIZEOF(epool_event)" << sizeof(epoll_event) << std::endl;
+
+        std::cout << "sizeof(UniqueFd)" << sizeof(UniqueFd) << std::endl;
 
         // Add server's fd_ to get accept events
         if (epoll_ctl(epoll_fd_.get(), EPOLL_CTL_ADD, fd_.get(), &ev) < 0)
@@ -70,7 +76,7 @@ namespace protei
 
             for (int i = 0; i < event_count; i++)
             {
-                if (events[i].data.fd == fd_.get())
+                if ((reinterpret_cast<ClientCtx *>(events[i].data.ptr))->fd == fd_)
                 {
                     try
                     {
@@ -83,7 +89,7 @@ namespace protei
                 }
                 else
                 {
-                    add_to_queue(events[i].data.fd);
+                    add_to_queue(*(ClientCtx *)(events[i].data.ptr));
                 }
             }
         }
@@ -93,7 +99,7 @@ namespace protei
     {
         while (!stop_.load(std::memory_order_acquire))
         {
-            int client_fd = -1;
+            ClientCtx client_ctx{};
             {
                 std::unique_lock lock(queue_mtx_);
                 cv_.wait(lock, [this]()
@@ -102,11 +108,18 @@ namespace protei
                 if (stop_ && connection_queue_.empty())
                     break;
 
-                client_fd = connection_queue_.front();
+                client_ctx = connection_queue_.front();
                 connection_queue_.pop();
+                {
+                    std::unique_lock set_lock(set_mtx_);
+                    if (busy_clients_.contains(client_ctx.fd))
+                        continue;
+                    else
+                        busy_clients_.insert(client_ctx.fd);
+                }
             }
 
-            process_client(client_fd);
+            process_client(client_ctx);
         }
     }
 
@@ -121,7 +134,7 @@ namespace protei
             throw std::runtime_error("Error acceptin client");
 
         epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLET;
+        ev.events = EPOLLIN;
         ev.data.fd = client_fd.get();
 
         // Add client_fd to epoll
@@ -129,17 +142,18 @@ namespace protei
             throw std::runtime_error("Error adding client socket to epoll");
 
         // Save client_fd
-        clients_.emplace_back(std::move(client_fd));
+        // clients_.emplace_back(std::move(client_fd));
+        client_fd.release();
     }
 
-    void Server::add_to_queue(int fd)
+    void Server::add_to_queue(ClientCtx fd)
     {
         std::unique_lock lock(queue_mtx_);
         connection_queue_.push(fd);
         cv_.notify_one();
     }
 
-    void Server::process_client(int client_fd)
+    void Server::process_client(ClientCtx client_fd)
     {
 
         // Пример обработки
@@ -149,19 +163,24 @@ namespace protei
         // посчтиать выржаение и отпрваить ответ
         // выржаения разделяются пробелами, но
         // мы можем прочесть выражегние не полностью...
-        ssize_t n = read(client_fd, buffer, sizeof(buffer));
-        if (n > 0)
-        {
-            std::cout << "Received: " << std::string(buffer, n) << std::endl;
-            // Отправка ответа
-            write(client_fd, "OK", 2);
-        }
-        else
-        {
-            std::cerr << "Error reading from client" << std::endl;
-        }
+        // ssize_t n = read(client_fd, buffer, sizeof(buffer));
+        // if (n > 0)
+        // {
+        //     std::cout << "Received: " << std::string(buffer, n) << std::endl;
+        //     // Отправка ответа
+        //     write(client_fd, "OK", 2);
+        // }
+        // else
+        // {
+        //     std::cerr << "Error reading from client" << std::endl;
+        // }
 
         // close(client_fd);
     }
+
+    // void Server::safe_write(int client_fd, const std::string &data)
+    // {
+    //     ::write(client_fd, data.data(), data.size());
+    // }
 
 } // namespace protei

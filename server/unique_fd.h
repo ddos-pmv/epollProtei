@@ -33,6 +33,11 @@ namespace protei
       return *this;
     }
 
+    int release()
+    {
+      return std::exchange(fd_, -1);
+    }
+
     int get() const
     {
       return fd_;
@@ -43,6 +48,13 @@ namespace protei
     {
       return fd_ <=> static_cast<long long>(other);
     }
+
+    template <std::integral T>
+    bool operator==(T other) const
+    {
+      return fd_ == static_cast<int>(other);
+    }
+
     auto operator<=>(const UniqueFd &other) const = default;
 
   private:
