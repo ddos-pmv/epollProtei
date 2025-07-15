@@ -1,9 +1,12 @@
 #include "server.h"
 
+#include "unique_ctx.h"
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
 
+#include <memory>
 #include <iostream>
 
 #define MAX_EVENTS 1024
@@ -12,12 +15,12 @@ namespace protei
 {
 
     Server::Server(uint16_t port, int thread_count) : port_(port),
-                                                      fd_(socket(AF_INET, SOCK_STREAM, 0)),
+                                                      server_ctx_(std::make_shared<UniqueCtx>(socket(AF_INET, SOCK_STREAM, 0))),
                                                       epoll_fd_(epoll_create1(0)),
                                                       thread_count_(thread_count),
                                                       stop_(false)
     {
-        if (0 > fd_)
+        if (0 > server_ctx_->fd())
             throw std::runtime_error("no socket can't be created");
 
         sockaddr_in serverAddress;
@@ -26,36 +29,29 @@ namespace protei
         serverAddress.sin_addr.s_addr = INADDR_ANY;
 
         int opt = 1;
-        if (setsockopt(fd_.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0)
+        if (setsockopt(server_ctx_->fd(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0)
             throw std::runtime_error("Error setting options");
 
         // Bind server socket to port
-        if (bind(fd_.get(), reinterpret_cast<struct sockaddr *>(&serverAddress),
+        if (bind(server_ctx_->fd(), reinterpret_cast<struct sockaddr *>(&serverAddress),
                  sizeof(serverAddress)) < 0)
             throw std::runtime_error("Error socket binding");
 
         // Make listening
-        if (listen(fd_.get(), SOMAXCONN) < 0)
+        if (listen(server_ctx_->fd(), SOMAXCONN) < 0)
             throw std::runtime_error("Error listening on socket");
 
         // Check if epoll was created
         if (epoll_fd_ < 0)
             throw std::runtime_error("Erroe creating epoll");
 
+        // Setting evpoll_event with server context
         epoll_event ev{};
         ev.events = EPOLLIN; // LT by default
-
-        auto server_ctx = new ClientCtx;
-        server_ctx->fd = fd_.get();
-        ev.data.ptr = server_ctx;
-
-        std::cout
-            << "SIZEOF(epool_event)" << sizeof(epoll_event) << std::endl;
-
-        std::cout << "sizeof(UniqueFd)" << sizeof(UniqueFd) << std::endl;
+        ev.data.ptr = server_ctx_.get();
 
         // Add server's fd_ to get accept events
-        if (epoll_ctl(epoll_fd_.get(), EPOLL_CTL_ADD, fd_.get(), &ev) < 0)
+        if (epoll_ctl(epoll_fd_.get(), EPOLL_CTL_ADD, server_ctx_->fd(), &ev) < 0)
             throw std::runtime_error("Error adding server socket to epoll");
 
         // Start thread pool
@@ -76,7 +72,8 @@ namespace protei
 
             for (int i = 0; i < event_count; i++)
             {
-                if ((reinterpret_cast<ClientCtx *>(events[i].data.ptr))->fd == fd_)
+                UniqueCtx *ctx_ptr = static_cast<UniqueCtx *>(events[i].data.ptr);
+                if (ctx_ptr->fd() == server_ctx_->fd())
                 {
                     try
                     {
@@ -89,7 +86,7 @@ namespace protei
                 }
                 else
                 {
-                    add_to_queue(*(ClientCtx *)(events[i].data.ptr));
+                    add_to_queue(ctx_ptr);
                 }
             }
         }
@@ -99,7 +96,8 @@ namespace protei
     {
         while (!stop_.load(std::memory_order_acquire))
         {
-            ClientCtx client_ctx{};
+            UniqueCtx *client_ctx;
+
             {
                 std::unique_lock lock(queue_mtx_);
                 cv_.wait(lock, [this]()
@@ -110,16 +108,18 @@ namespace protei
 
                 client_ctx = connection_queue_.front();
                 connection_queue_.pop();
+            }
+            {
+                std::unique_lock set_lock(set_mtx_);
+                // Skip this client if it's even in thread
+                if (busy_clients_.contains(client_ctx->fd()))
+                    continue;
+                else
                 {
-                    std::unique_lock set_lock(set_mtx_);
-                    if (busy_clients_.contains(client_ctx.fd))
-                        continue;
-                    else
-                        busy_clients_.insert(client_ctx.fd);
+                    busy_clients_.insert(client_ctx->fd());
+                    process_client(client_ctx);
                 }
             }
-
-            process_client(client_ctx);
         }
     }
 
@@ -127,60 +127,46 @@ namespace protei
     {
         sockaddr_in clinet_addr{};
         socklen_t client_addr_size = sizeof(sockaddr_in);
-        UniqueFd client_fd(accept(fd_.get(), reinterpret_cast<sockaddr *>(&clinet_addr),
-                                  &client_addr_size));
+        CtxSharedPtr client_ctx = std::make_shared<UniqueCtx>(accept(server_ctx_->fd(), reinterpret_cast<sockaddr *>(&clinet_addr),
+                                                                     &client_addr_size));
 
-        if (client_fd < 0)
+        if (client_ctx->fd() < 0)
             throw std::runtime_error("Error acceptin client");
+        else
+        {
+            std::unique_lock lock(map_mtx_);
+            client_buffers_[client_ctx->fd()] = client_ctx;
+        }
 
         epoll_event ev{};
         ev.events = EPOLLIN;
-        ev.data.fd = client_fd.get();
+        ev.data.ptr = client_ctx.get();
 
         // Add client_fd to epoll
-        if (epoll_ctl(epoll_fd_.get(), EPOLL_CTL_ADD, client_fd.get(), &ev) < 0)
+        if (epoll_ctl(epoll_fd_.get(), EPOLL_CTL_ADD, client_ctx->fd(), &ev) < 0)
             throw std::runtime_error("Error adding client socket to epoll");
-
-        // Save client_fd
-        // clients_.emplace_back(std::move(client_fd));
-        client_fd.release();
     }
 
-    void Server::add_to_queue(ClientCtx fd)
+    void Server::add_to_queue(UniqueCtx *const client_ctx)
     {
         std::unique_lock lock(queue_mtx_);
-        connection_queue_.push(fd);
+        connection_queue_.push(client_ctx);
         cv_.notify_one();
     }
 
-    void Server::process_client(ClientCtx client_fd)
+    void Server::process_client(UniqueCtx *const client_ctx)
     {
 
         // Пример обработки
-        char buffer[1024];
 
         // Здесь мы должны прочитать арифметическое выржаение
         // посчтиать выржаение и отпрваить ответ
         // выржаения разделяются пробелами, но
         // мы можем прочесть выражегние не полностью...
-        // ssize_t n = read(client_fd, buffer, sizeof(buffer));
-        // if (n > 0)
-        // {
-        //     std::cout << "Received: " << std::string(buffer, n) << std::endl;
-        //     // Отправка ответа
-        //     write(client_fd, "OK", 2);
-        // }
-        // else
-        // {
-        //     std::cerr << "Error reading from client" << std::endl;
-        // }
 
-        // close(client_fd);
+        // ssize_t n = read(client_ctx->fd(), client_ctx->buffer().data(), sizeof());
+
+        // write(client_ctx->fd(), client_ctx->buffer().data)
     }
-
-    // void Server::safe_write(int client_fd, const std::string &data)
-    // {
-    //     ::write(client_fd, data.data(), data.size());
-    // }
 
 } // namespace protei
