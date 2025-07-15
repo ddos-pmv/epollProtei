@@ -1,32 +1,25 @@
 #pragma once
 
-#include <string>
 #include <vector>
 #include <random>
 #include <sstream>
+#include <string>
 
 namespace protei
 {
-    std::string generate_expression(int num_operands)
+    std::string generate_expression(int n)
     {
-        if (num_operands <= 0)
-            throw std::invalid_argument("Must have at least one operand");
-
         static std::mt19937 rng{std::random_device{}()};
-        std::uniform_int_distribution<int> number_dist(1, 100);
-        std::uniform_int_distribution<int> op_dist(0, 2);
-        const char *ops[] = {"+", "-", "*"};
+        static std::uniform_int_distribution<int> num_dist(1, 100);
+        static std::uniform_int_distribution<int> op_dist(0, 1);
+        static const char ops[] = {'+', '-'};
 
-        std::ostringstream oss;
-        oss << number_dist(rng); // первое число
-
-        for (int i = 1; i < num_operands; ++i)
+        std::ostringstream expr;
+        expr << num_dist(rng);
+        for (int i = 1; i < n; ++i)
         {
-            const char *op = ops[op_dist(rng)];
-            int number = number_dist(rng);
-            oss << op << number;
+            expr << ops[op_dist(rng)] << num_dist(rng);
         }
-
-        return oss.str(); // пример: "13 + 5 * 2 - 8"
+        return expr.str();
     }
 }
