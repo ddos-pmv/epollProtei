@@ -8,6 +8,8 @@ project(${CMAKE_PROJECT_NAME})
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+add_subdirectory(utilslib)
 add_subdirectory(server)
+add_subdirectory(client)
 
 
